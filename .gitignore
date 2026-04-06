@@ -1,0 +1,41 @@
+# Secrets / local env
+.env
+.env.*
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.egg-info/
+build/
+dist/
+
+# Node/Electron
+node_modules/
+*.tsbuildinfo
+
+# Runtime / generated app data (private)
+data/
+logs/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Personal memory - never commit
+_BASE_MEMORY_SAFE/
+**/_BASE_MEMORY_SAFE/
+
+# Temp files
+*.tmp
+*.bak
+*.swp
