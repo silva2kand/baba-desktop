@@ -467,7 +467,25 @@ class Dispatcher:
         elif step_type == "tool":
             tool_name = step.get("tool")
             if self.tools:
-                result = self.tools.run(tool_name, path=".", query=task.instruction)
+                kwargs = {
+                    k: v
+                    for k, v in step.items()
+                    if k
+                    not in {
+                        "name",
+                        "type",
+                        "tool",
+                        "requires_approval",
+                    }
+                }
+                if tool_name == "brain_search" and "query" not in kwargs:
+                    kwargs["query"] = task.instruction
+                if tool_name == "list_dir" and "path" not in kwargs:
+                    kwargs["path"] = "."
+                if tool_name == "search_files" and "directory" not in kwargs:
+                    kwargs["directory"] = "."
+                    kwargs.setdefault("pattern", task.instruction)
+                result = self.tools.run(tool_name, **kwargs)
                 return str(result)[:200]
             return f"Tool {tool_name} executed"
 

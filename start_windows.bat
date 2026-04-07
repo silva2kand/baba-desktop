@@ -9,5 +9,5 @@ echo  ╚═══════════════════════�
 echo.
 echo  Starting Baba Desktop...
 echo.
-python main.py
+python main.py --ui v13
 pause

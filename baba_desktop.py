@@ -86,9 +86,15 @@ except ImportError:
     AppBridge = None
 
 try:
-    from src.memory.memory import Memory
+    from src.memory.memory import (
+        Memory,
+        ensure_master_memory_file,
+        load_master_memory_text,
+    )
 except ImportError:
     Memory = None
+    ensure_master_memory_file = None
+    load_master_memory_text = None
 
 try:
     from src.dispatch.dispatcher import Dispatcher
@@ -129,6 +135,16 @@ try:
     from src.tools_experimental.builder import ToolBuilder
 except ImportError:
     ToolBuilder = None
+
+try:
+    from src.ui.server import UIServer
+except ImportError:
+    UIServer = None
+
+try:
+    from src.sentinel.sentinel import Sentinel
+except ImportError:
+    Sentinel = None
 
 THEMES = {
     "Midnight": {
@@ -876,6 +892,7 @@ class BabaDesktop(tk.Tk):
 
         self._init_backend()
         self._build()
+        self.bind_all("<Control-Alt-b>", self._sentinel_hotkey_trigger)
         self._log_strip()
         self.after(100, self._process_log_queue)
         self.after(500, self._auto_probe)
@@ -899,6 +916,7 @@ class BabaDesktop(tk.Tk):
         self.chrome = None
         self.claws = None
         self.tool_builder = None
+        self.sentinel = None
         self.voice = VoiceEngine()
 
         try:
@@ -914,14 +932,28 @@ class BabaDesktop(tk.Tk):
                 "openrouter": {"api_key_env": "OPENROUTER_API_KEY"},
                 "qwen": {"api_key_env": "QWEN_API_KEY"},
             }
-            self.pool = ProviderPool(cfg)
+            master_memory = ""
+            if ensure_master_memory_file and load_master_memory_text:
+                ensure_master_memory_file("data/baba_master_memory.txt")
+                master_memory = load_master_memory_text("data/baba_master_memory.txt")
+            self.pool = ProviderPool(
+                cfg,
+                master_memory_text=master_memory,
+                master_memory_path="data/baba_master_memory.txt",
+            )
             self.log_queue.put(("log", "Provider Pool initialized"))
         except Exception as e:
             self.log_queue.put(("log", f"Provider Pool init failed: {e}"))
 
         try:
             self.tools = ToolRegistry(self.brain) if self.brain else ToolRegistry()
-            self.log_queue.put(("log", "Tool Registry initialized"))
+            runtime_count = len(getattr(self.tools, "_runtime_tool_names", []))
+            self.log_queue.put(
+                (
+                    "log",
+                    f"Tool Registry initialized ({len(self.tools.all())} total, {runtime_count} runtime)",
+                )
+            )
         except Exception as e:
             self.log_queue.put(("log", f"Tool Registry init failed: {e}"))
 
@@ -985,6 +1017,17 @@ class BabaDesktop(tk.Tk):
                 self.log_queue.put(("log", "Dispatcher initialized + worker started"))
         except Exception as e:
             self.log_queue.put(("log", f"Dispatcher init failed: {e}"))
+
+        try:
+            if Sentinel:
+                self.sentinel = Sentinel(
+                    pc_bridge=self.pc,
+                    on_event=self._on_sentinel_event,
+                )
+                self.sentinel.start()
+                self.log_queue.put(("log", "Sentinel initialized + started"))
+        except Exception as e:
+            self.log_queue.put(("log", f"Sentinel init failed: {e}"))
 
         try:
             self.scheduler = (
@@ -2437,6 +2480,9 @@ class BabaDesktop(tk.Tk):
             "Email & Comms": [
                 ("Gmail", lambda: self._app_action("gmail", "open")),
                 ("Outlook", lambda: self._app_action("outlook", "read_inbox")),
+                ("Connect Outlook OAuth", self._outlook_oauth_connect),
+                ("Disconnect Outlook OAuth", self._outlook_oauth_disconnect),
+                ("Test Outlook OAuth Inbox", self._outlook_oauth_test_read),
                 ("WhatsApp Web", lambda: self._open_url("https://web.whatsapp.com")),
             ],
             "Browsers": [
@@ -2450,6 +2496,7 @@ class BabaDesktop(tk.Tk):
             "Dev Tools": [
                 ("VS Code", lambda: self._app_action("vscode", "open")),
                 ("Terminal", lambda: subprocess.Popen("start cmd", shell=True)),
+                ("Sentinel Capture Now", self._sentinel_hotkey_trigger),
             ],
             "Knowledge": [
                 ("Obsidian", lambda: self._app_action("obsidian", "open")),
@@ -2501,6 +2548,118 @@ class BabaDesktop(tk.Tk):
                 except Exception as e:
                     self._log(f"App error: {e}")
         self._log(f"App {app_id}.{action} not available")
+
+    def _on_sentinel_event(self, task):
+        if not self.dispatcher:
+            return {"accepted": False, "error": "Dispatcher not available"}
+
+        event_type = str(task.get("event_type", "")).strip()
+        payload = task.get("payload", {}) or {}
+        source = str(task.get("source", "sentinel")).strip() or "sentinel"
+        priority = 4 if str(task.get("priority", "normal")) == "high" else 5
+
+        instruction = "Review sentinel event and suggest next actions"
+        if event_type == "hotkey_context":
+            active = payload.get("active_window", {}) or {}
+            instruction = (
+                "Analyze hotkey context from active window and clipboard, "
+                "then suggest concrete next actions."
+            )
+            if active.get("title"):
+                instruction += f" Active window: {active.get('title')}"
+        elif event_type == "file_event":
+            path = payload.get("path", "")
+            instruction = (
+                "A watched file changed. Ingest and analyze this file, "
+                f"then report actions: {path}"
+            )
+        elif event_type == "clipboard_signal":
+            instruction = (
+                "Clipboard signal detected. Analyze copied content and suggest "
+                "business-relevant actions."
+            )
+
+        dispatch_task = self.dispatcher.submit(
+            instruction=instruction,
+            source=f"sentinel_{source}",
+            context={"sentinel_task": task, "payload": payload},
+            priority=priority,
+        )
+        self.log_queue.put(
+            (
+                "log",
+                f"Sentinel queued task {dispatch_task.task_id} from {event_type or source}",
+            )
+        )
+        return {"accepted": True, "queued_task_id": dispatch_task.task_id}
+
+    def _sentinel_hotkey_trigger(self, _event=None):
+        if not self.sentinel:
+            self._log("Sentinel not initialized")
+            return
+        try:
+            out = self.sentinel.trigger_hotkey_capture(include_screenshot=False)
+            if out.get("ok"):
+                task = out.get("task", {})
+                self._log(
+                    f"Sentinel hotkey captured. Inbox task: {task.get('id', 'n/a')}"
+                )
+            else:
+                self._log(f"Sentinel hotkey failed: {out}")
+        except Exception as e:
+            self._log(f"Sentinel hotkey error: {e}")
+
+    def _outlook_oauth_connect(self):
+        if not self.apps:
+            self._log("App Bridge not initialized")
+            return
+        try:
+            result = self.apps.outlook_oauth_start(open_browser=True)
+            if result.get("ok"):
+                self._log(
+                    "Outlook OAuth started. Finish sign-in in browser, then return to app."
+                )
+                listener = result.get("listener", {})
+                if isinstance(listener, dict) and listener.get("ok"):
+                    self._log(
+                        f"OAuth listener active at {listener.get('redirect_uri', '')}"
+                    )
+                elif isinstance(listener, dict) and listener.get("error"):
+                    self._log(
+                        "OAuth listener warning: "
+                        f"{listener.get('error')} (callback may still work via UI server)"
+                    )
+            else:
+                self._log(f"Outlook OAuth start failed: {result}")
+        except Exception as e:
+            self._log(f"Outlook OAuth error: {e}")
+
+    def _outlook_oauth_disconnect(self):
+        if not self.apps:
+            self._log("App Bridge not initialized")
+            return
+        try:
+            result = self.apps.outlook_oauth_disconnect()
+            self._log(f"Outlook OAuth disconnect: {result}")
+            self._refresh_apps()
+        except Exception as e:
+            self._log(f"Outlook OAuth disconnect error: {e}")
+
+    def _outlook_oauth_test_read(self):
+        if not self.apps:
+            self._log("App Bridge not initialized")
+            return
+        try:
+            messages = self.apps.outlook_read_inbox(limit=5, folder="Inbox")
+            if messages and isinstance(messages[0], dict) and messages[0].get("error"):
+                self._log(f"Outlook inbox read error: {messages[0].get('error')}")
+                hint = messages[0].get("hint")
+                if hint:
+                    self._log(f"Hint: {hint}")
+                return
+            self._log(f"Outlook OAuth inbox read success: {len(messages)} message(s)")
+        except Exception as e:
+            self._log(f"Outlook inbox read failed: {e}")
 
     def _refresh_apps(self):
         def _do():
@@ -2604,6 +2763,38 @@ class BabaDesktop(tk.Tk):
                 f"gmail={email_agents.get('exo_gmail')} "
                 f"outlook={email_agents.get('exo_outlook')}"
             )
+            lines.append(
+                "Outlook OAuth: "
+                f"configured={email_agents.get('oauth_outlook_configured')} "
+                f"connected={email_agents.get('oauth_outlook_connected')}"
+            )
+            if email_agents.get("oauth_redirect_uri"):
+                lines.append(f"OAuth Redirect: {email_agents.get('oauth_redirect_uri')}")
+        if self.sentinel:
+            try:
+                st = self.sentinel.status()
+                lines.append("")
+                lines.append(
+                    "Sentinel: "
+                    f"enabled={st.get('enabled')} "
+                    f"running={st.get('running')} "
+                    f"active_app_allowed={st.get('active_app_allowed')}"
+                )
+                lines.append(
+                    f"Sentinel Hotkey: {st.get('hotkey', '')} "
+                    f"(registered={st.get('hotkey_registered')}, backend={st.get('hotkey_backend')})"
+                )
+                inbox = st.get("inbox", {})
+                if inbox:
+                    lines.append(f"Sentinel Inbox: total={inbox.get('total', 0)}")
+                active = st.get("active_window", {})
+                if active:
+                    lines.append(
+                        f"Active Window: {active.get('title', '')} "
+                        f"[{active.get('process_name', '')}]"
+                    )
+            except Exception:
+                pass
         return "\n".join(lines)
 
     def _launch_app(self, name):

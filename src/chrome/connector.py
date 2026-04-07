@@ -87,6 +87,16 @@ class ChromeConnector:
                 )
                 return JSONResponse(result)
 
+            @app.post("/chrome/session_guard")
+            async def session_guard(req: Request):
+                data = await req.json()
+                result = self.detect_auth_gate(
+                    data.get("url", ""),
+                    data.get("title", ""),
+                    data.get("text", ""),
+                )
+                return JSONResponse(result)
+
             @app.post("/chrome/index_page")
             async def index_page(req: Request):
                 data = await req.json()
@@ -226,6 +236,39 @@ Return as structured JSON."""
             "ok": True,
             "task_id": task.task_id,
             "message": f"Task queued on desktop: {instruction[:60]}",
+        }
+
+    def detect_auth_gate(self, url: str, title: str, text: str) -> Dict[str, Any]:
+        probe = f"{url}\n{title}\n{text[:3000]}".lower()
+        login_terms = [
+            "sign in",
+            "log in",
+            "login",
+            "create account",
+            "sign up",
+            "register",
+            "enter code",
+            "two-factor",
+            "2fa",
+            "verify it's you",
+            "security challenge",
+            "captcha",
+        ]
+        matched = [term for term in login_terms if term in probe]
+        needs_user = bool(matched)
+        action = "user_login_required" if needs_user else "automation_allowed"
+        if any(t in probe for t in ["captcha", "verify it's you", "two-factor", "2fa"]):
+            action = "user_verification_required"
+        return {
+            "ok": True,
+            "requires_user_action": needs_user,
+            "action": action,
+            "matched_terms": matched[:8],
+            "message": (
+                "Please complete sign-in/verification manually, then run automation."
+                if needs_user
+                else "No auth gate detected. Automation can continue."
+            ),
         }
 
     async def index_to_brain(self, url: str, text: str, title: str = "") -> Dict:

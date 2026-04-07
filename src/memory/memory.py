@@ -8,7 +8,51 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import datetime, UTC
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
+
+
+MASTER_MEMORY_FILE = Path("data/baba_master_memory.txt")
+MASTER_MEMORY_DEFAULT = """# BABA MASTER MEMORY
+
+This file is the canonical local master memory for Baba Desktop.
+Rules:
+- Keep updates additive.
+- Do not overwrite prior approved memory.
+- Persist changes locally on this machine.
+"""
+
+
+def _coerce_master_memory_path(path: Optional[Union[str, Path]] = None) -> Path:
+    p = Path(path) if path else MASTER_MEMORY_FILE
+    return p if p.is_absolute() else Path.cwd() / p
+
+
+def ensure_master_memory_file(path: Optional[Union[str, Path]] = None) -> Path:
+    target = _coerce_master_memory_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_text(MASTER_MEMORY_DEFAULT, encoding="utf-8")
+    return target
+
+
+def load_master_memory_text(path: Optional[Union[str, Path]] = None) -> str:
+    target = ensure_master_memory_file(path)
+    try:
+        return target.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def append_master_memory_text(
+    block: str, path: Optional[Union[str, Path]] = None
+) -> Path:
+    target = ensure_master_memory_file(path)
+    text = (block or "").strip()
+    if not text:
+        return target
+    with target.open("a", encoding="utf-8") as f:
+        f.write("\n\n" + text + "\n")
+    return target
 
 
 class Memory:
@@ -267,6 +311,12 @@ class Memory:
             "approval_patterns": len(self._data.get("approval_patterns", [])),
             "chroma_active": self._use_chroma,
         }
+
+    def get_master_memory(self, path: Optional[Union[str, Path]] = None) -> str:
+        return load_master_memory_text(path)
+
+    def append_master_memory(self, block: str, path: Optional[Union[str, Path]] = None):
+        append_master_memory_text(block, path)
 
     def _load(self) -> Dict:
         if self._mem_file.exists():

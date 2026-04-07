@@ -5,6 +5,7 @@ import os
 import argparse
 import threading
 import socket
+import time
 from pathlib import Path
 
 APP_DIR = Path(__file__).parent.resolve()
@@ -35,6 +36,11 @@ def main():
     parser.add_argument(
         "--no-backend", action="store_true", help="Skip backend service startup"
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run backend services only (no desktop UI window)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -49,6 +55,10 @@ def main():
 
             settings = Settings.load()
             print("    [OK] Settings loaded")
+            try:
+                print(f"    [OK] OAuth redirect: {settings.get_localhost_redirect_uri()}")
+            except Exception:
+                pass
 
             from src.brain.index import BrainIndex
 
@@ -57,14 +67,25 @@ def main():
             print(f"    [OK] Brain Index: {stats.get('total', 0)} items")
 
             from src.providers.pool import ProviderPool
+            from src.memory.memory import load_master_memory_text, ensure_master_memory_file
 
-            pool = ProviderPool(settings.providers)
+            ensure_master_memory_file("data/baba_master_memory.txt")
+            master_memory = load_master_memory_text("data/baba_master_memory.txt")
+            pool = ProviderPool(
+                settings.providers,
+                master_memory_text=master_memory,
+                master_memory_path="data/baba_master_memory.txt",
+            )
             print("    [OK] Provider pool created (7 providers)")
 
             from src.tools.registry import ToolRegistry
 
             tools = ToolRegistry(brain)
-            print(f"    [OK] Tool registry: {len(tools.all())} tools")
+            runtime_count = len(getattr(tools, "_runtime_tool_names", []))
+            print(
+                f"    [OK] Tool registry: {len(tools.all())} tools "
+                f"({runtime_count} runtime)"
+            )
 
             from src.vision.pipeline import VisionPipeline
 
@@ -95,6 +116,15 @@ def main():
 
             apps = AppBridge(settings)
             print("    [OK] App Bridge ready")
+            try:
+                oauth_status = apps.outlook_oauth_status()
+                print(
+                    "    [OK] Outlook OAuth: "
+                    f"{'connected' if oauth_status.get('connected') else 'not connected'} "
+                    f"(redirect {oauth_status.get('redirect_uri', '')})"
+                )
+            except Exception:
+                pass
 
             from src.memory.memory import Memory
 
@@ -107,6 +137,31 @@ def main():
             disp_thread = threading.Thread(target=dispatcher.start_worker, daemon=True)
             disp_thread.start()
             print("    [OK] Dispatcher worker started")
+
+            from src.sentinel.sentinel import Sentinel
+
+            def _on_sentinel_event(task):
+                event_type = str(task.get("event_type", "")).strip()
+                payload = task.get("payload", {}) or {}
+                priority = 4 if str(task.get("priority", "normal")) == "high" else 5
+                instruction = "Analyze sentinel event and suggest next actions."
+                if event_type == "hotkey_context":
+                    instruction = "Analyze hotkey context from active window and clipboard."
+                elif event_type == "file_event":
+                    instruction = f"Analyze watched file event for path: {payload.get('path', '')}"
+                elif event_type == "clipboard_signal":
+                    instruction = "Analyze clipboard signal and propose actions."
+                queued = dispatcher.submit(
+                    instruction=instruction,
+                    source=f"sentinel_{task.get('source', 'sentinel')}",
+                    context={"sentinel_task": task},
+                    priority=priority,
+                )
+                return {"accepted": True, "queued_task_id": queued.task_id}
+
+            sentinel = Sentinel(pc_bridge=pc, on_event=_on_sentinel_event)
+            sentinel.start()
+            print("    [OK] Sentinel ready")
 
             from src.scheduler.scheduler import Scheduler
 
@@ -153,6 +208,41 @@ def main():
             tool_builder = ToolBuilder(pool, brain, settings, memory)
             print("    [OK] Tool Builder ready")
 
+            # Start unified UI/API server with the same live backend services
+            # so context-menu, sentinel, auth, and dispatch share one runtime.
+            if _port_available(settings.ui_port):
+                try:
+                    from src.ui.server import UIServer
+
+                    services = {
+                        "settings": settings,
+                        "brain": brain,
+                        "pool": pool,
+                        "tools": tools,
+                        "vision": vision,
+                        "claws": claws,
+                        "orchestrator": agents,
+                        "memory": memory,
+                        "tool_builder": tool_builder,
+                        "apps": apps,
+                        "dispatcher": dispatcher,
+                        "scheduler": scheduler,
+                        "cowork": cowork,
+                        "pc": pc,
+                        "sentinel": sentinel,
+                    }
+                    ui_server = UIServer(services)
+                    ui_thread = threading.Thread(target=ui_server.run, daemon=True)
+                    ui_thread.start()
+                    print(f"    [OK] UI/API server on port {settings.ui_port}")
+                except Exception as e:
+                    print(f"    [WARN] UI/API server start failed: {e}")
+            else:
+                print(
+                    f"    [WARN] UI/API port {settings.ui_port} already in use; "
+                    "reusing existing service"
+                )
+
             print("\n  All backend services started!")
 
         except Exception as e:
@@ -161,6 +251,18 @@ def main():
 
             traceback.print_exc()
             print("  Continuing with GUI-only mode...")
+
+    if args.headless:
+        if args.no_backend:
+            print("\n  Headless mode + --no-backend: nothing to run.")
+            return
+        print("\n  Headless mode active: backend services running, desktop UI disabled.")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("\n  Stopping headless backend...")
+        return
 
     print(f"\n  Launching {args.ui} UI...")
 

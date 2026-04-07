@@ -17,6 +17,7 @@ class TriggerType(Enum):
     TIME_DAILY = "daily"
     TIME_WEEKLY = "weekly"
     TIME_MONTHLY = "monthly"
+    TIME_INTERVAL = "interval"
     TIME_ONCE = "once"
     FILE_NEW = "file_new"
     FILE_CHANGED = "file_changed"
@@ -41,6 +42,14 @@ class ScheduledTask:
 
 
 BUILT_IN_SCHEDULES = [
+    {
+        "task_id": "email_organiser_45m",
+        "name": "Email organiser (every 45 min)",
+        "instruction": "Organise all inbox emails into urgent, accounting, supplier, legal, and follow-up categories. Summarise required actions.",
+        "trigger": TriggerType.TIME_INTERVAL,
+        "trigger_cfg": {"minutes": 45, "run_on_start": True},
+        "enabled": True,
+    },
     {
         "task_id": "daily_email_check",
         "name": "Daily email triage",
@@ -244,6 +253,13 @@ class Scheduler:
                 ):
                     return True
 
+        elif task.trigger == TriggerType.TIME_INTERVAL:
+            minutes = int(cfg.get("minutes", 45))
+            minutes = max(1, minutes)
+            if last is None:
+                return bool(cfg.get("run_on_start", True))
+            return (now - last) >= timedelta(minutes=minutes)
+
         elif task.trigger == TriggerType.FILE_NEW:
             folder = Path(cfg.get("folder", "data/imports"))
             if folder.exists():
@@ -277,6 +293,13 @@ class Scheduler:
             if candidate <= now:
                 candidate += timedelta(days=1)
             return candidate.isoformat()
+        if task.trigger == TriggerType.TIME_INTERVAL:
+            minutes = int(cfg.get("minutes", 45))
+            minutes = max(1, minutes)
+            if task.last_run:
+                last = datetime.fromisoformat(task.last_run)
+                return (last + timedelta(minutes=minutes)).isoformat()
+            return now.isoformat()
         return None
 
     def _save_state(self):

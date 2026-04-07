@@ -6,6 +6,7 @@ Brain Index, Provider Pool, Tools, and Vision Pipeline.
 
 import asyncio
 import json
+import re
 from typing import Dict, List, Any, Optional
 from datetime import date, datetime, UTC
 from pathlib import Path
@@ -173,6 +174,56 @@ AGENTS = {
             "Propose weekly knowledge maintenance tasks",
         ],
     },
+    "solicitor": {
+        "name": "Solicitor Expert Agent",
+        "role": "Legal specialist for disputes, contracts, notices, property compliance, and deadlines. Draft solicitor-ready summaries and letters. Never provide formal legal advice.",
+        "tasks": [
+            "Build legal risk register from indexed data",
+            "Draft solicitor briefing pack",
+            "Prioritise legal deadlines and notices",
+            "Draft formal response letters (approval required)",
+        ],
+    },
+    "accountant": {
+        "name": "Accountant Expert Agent",
+        "role": "Accounting specialist for VAT/HMRC, invoices, cashflow, and controls. Produce accountant-ready summaries and action lists.",
+        "tasks": [
+            "Prepare VAT/HMRC risk and deadline summary",
+            "Analyse overdue invoices and payment risk",
+            "Build weekly cashflow action plan",
+            "Draft accountant handover summary",
+        ],
+    },
+    "moneymaker": {
+        "name": "Money-Making Expert Agent",
+        "role": "Revenue and margin specialist across deals, suppliers, stock, and opportunities. Focus on practical upside with clear risks.",
+        "tasks": [
+            "Find top profit opportunities in current data",
+            "Rank margin improvement actions by impact",
+            "Identify supplier renegotiation wins",
+            "Create 30-day money-action plan",
+        ],
+    },
+    "coder": {
+        "name": "Coding & Programming Expert Agent",
+        "role": "Technical delivery specialist for automation, scripts, integrations, and reliable implementation plans. Keep changes safe and approval-gated.",
+        "tasks": [
+            "Design implementation plan for requested feature",
+            "Propose safe automation scripts and checks",
+            "Draft integration steps and validation tests",
+            "Prepare debugging and rollback checklist",
+        ],
+    },
+    "programmer": {
+        "name": "Programmer Expert Agent",
+        "role": "Programming specialist (alias of coding expert) for end-to-end implementation strategy and technical execution support.",
+        "tasks": [
+            "Break feature into coding milestones",
+            "Generate test-first implementation outline",
+            "Identify technical risks and mitigations",
+            "Produce deployment-safe change plan",
+        ],
+    },
 }
 
 
@@ -212,8 +263,31 @@ class AgentOrchestrator:
         self.brain = brain
         self.tools = tools
         self.vision = vision
+        self.evidence_required_mode = True
+        # Web tool policy for agent-initiated tool calls:
+        # ask (default), approved, denied, stopped
+        self.web_tools_policy = "ask"
+
+    def _resolve_agent_id(self, agent_id: str) -> str:
+        aliases = {
+            "solicitor_expert": "solicitor",
+            "legal_expert": "solicitor",
+            "accounting": "accountant",
+            "acct_expert": "accountant",
+            "money": "moneymaker",
+            "moneymaker_expert": "moneymaker",
+            "coding": "coder",
+            "coding_expert": "coder",
+            "developer": "coder",
+            "dev": "coder",
+            "programming": "programmer",
+            "programmer_expert": "programmer",
+        }
+        aid = (agent_id or "").strip().lower()
+        return aliases.get(aid, aid)
 
     async def run(self, agent_id: str, task: str, extra_context: str = "") -> str:
+        agent_id = self._resolve_agent_id(agent_id)
         agent = AGENTS.get(agent_id)
         if not agent:
             raise ValueError(f"Unknown agent: {agent_id}")
@@ -228,6 +302,15 @@ class AgentOrchestrator:
             tools=tools_list or "brain_search, draft, analyse",
             date=date.today().isoformat(),
         )
+        if self.evidence_required_mode:
+            system = (
+                f"{system}\n\n"
+                "EVIDENCE REQUIRED MODE (STRICT):\n"
+                "- Do not invent facts, dates, counts, legal outcomes, or names.\n"
+                "- If uncertain, explicitly state unknown.\n"
+                "- Include an 'Evidence trail' section listing the sources used.\n"
+                "- Include a one-line 'Confidence' rating (high/medium/low) with reason.\n"
+            )
 
         brain_context = self._get_brain_context(agent_id)
 
@@ -253,10 +336,53 @@ Please analyse and respond according to your role. Remember: draft only, never e
                 provider, model, messages, system=system
             )
 
-        return reply
+        proposal_status = self._handle_skill_proposals_from_reply(reply, agent_id)
+        reply_clean = self._strip_skill_request_blocks(reply)
+        tool_results = self._execute_tool_calls_from_reply(reply_clean)
+        if tool_results:
+            tool_feedback = json.dumps(tool_results, indent=2)
+            follow_up = (
+                "Tool calls requested by your previous output have been executed.\n"
+                f"Tool results:\n{tool_feedback}\n\n"
+                "Now provide the final user-facing response using those tool results. "
+                "Do not include internal reasoning tags."
+            )
+            messages_2 = [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": reply_clean},
+                {"role": "user", "content": follow_up},
+            ]
+            try:
+                reply_clean = await self.pool.chat(
+                    provider, model, messages_2, system=system, max_tokens=2048
+                )
+            except Exception:
+                reply_clean, _ = await self.pool.chat_with_fallback(
+                    provider, model, messages_2, system=system
+                )
 
-    def run_sync(self, agent_id: str, task: str) -> str:
-        return asyncio.run(self.run(agent_id, task))
+        if proposal_status.get("queued", 0) > 0:
+            reply_clean = (
+                f"{reply_clean}\n\n"
+                f"[Self-Evolve] Queued {proposal_status['queued']} skill proposal(s) for approval."
+            )
+
+        if self.evidence_required_mode:
+            reply_clean = self._ensure_evidence_trail(reply_clean, brain_context, tool_results)
+
+        return reply_clean
+
+    def run_sync(self, agent_id: str, task: str, extra_context: str = "") -> str:
+        return asyncio.run(self.run(agent_id, task, extra_context=extra_context))
+
+    def set_web_tools_policy(self, policy: str):
+        p = str(policy or "").strip().lower()
+        if p not in {"ask", "approved", "denied", "stopped"}:
+            p = "ask"
+        self.web_tools_policy = p
+
+    def set_evidence_required_mode(self, enabled: bool):
+        self.evidence_required_mode = bool(enabled)
 
     def list_agents(self) -> List[Dict]:
         return [
@@ -264,6 +390,7 @@ Please analyse and respond according to your role. Remember: draft only, never e
         ]
 
     def _route(self, agent_id: str):
+        agent_id = self._resolve_agent_id(agent_id)
         routes = {
             "legal": ("groq", "llama-3.3-70b-versatile"),
             "acct": ("jan", "Qwen3_5-9B_Q4_K_M"),
@@ -277,10 +404,16 @@ Please analyse and respond according to your role. Remember: draft only, never e
             "kairos": ("jan", "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF"),
             "obsidian": ("ollama", "qwen3.5:latest"),
             "wiki": ("ollama", "qwen3.5:latest"),
+            "solicitor": ("jan", "Meta-Llama-3_1-8B-Instruct-IQ4_XS"),
+            "accountant": ("jan", "Meta-Llama-3_1-8B-Instruct-IQ4_XS"),
+            "moneymaker": ("jan", "Meta-Llama-3_1-8B-Instruct-IQ4_XS"),
+            "coder": ("ollama", "qwen3.5:latest"),
+            "programmer": ("ollama", "qwen3.5:latest"),
         }
         return routes.get(agent_id, ("ollama", "qwen3.5:latest"))
 
     def _get_brain_context(self, agent_id: str, limit: int = 10) -> str:
+        agent_id = self._resolve_agent_id(agent_id)
         type_map = {
             "legal": ["legal"],
             "acct": ["bill", "insurance"],
@@ -290,6 +423,11 @@ Please analyse and respond according to your role. Remember: draft only, never e
             "comms": ["comms"],
             "pa": ["bill", "insurance", "ops"],
             "wiki": [],
+            "solicitor": ["legal", "property"],
+            "accountant": ["bill", "insurance", "ops"],
+            "moneymaker": ["deal", "supplier", "bill", "ops"],
+            "coder": ["ops", "comms"],
+            "programmer": ["ops", "comms"],
         }
         types = type_map.get(agent_id, [])
         items = []
@@ -313,6 +451,162 @@ Please analyse and respond according to your role. Remember: draft only, never e
             lines.append(f"- [{it['type'].upper()}] {it['summary'][:80]}{risk}{renew}")
 
         return "\n".join(lines)
+
+    def _strip_skill_request_blocks(self, text: str) -> str:
+        cleaned = re.sub(
+            r"<request_new_skill>[\s\S]*?</request_new_skill>",
+            "",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        return cleaned.strip()
+
+    def _extract_skill_requests(self, text: str) -> List[Dict[str, str]]:
+        blocks = re.findall(
+            r"<request_new_skill>([\s\S]*?)</request_new_skill>",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        out = []
+        for block in blocks:
+            name = ""
+            reason = ""
+            risk = ""
+            code = ""
+            lines = block.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                low = line.lower()
+                if low.startswith("name:"):
+                    name = line.split(":", 1)[1].strip()
+                elif low.startswith("reason:"):
+                    reason = line.split(":", 1)[1].strip()
+                elif low.startswith("risk:"):
+                    risk = line.split(":", 1)[1].strip()
+                elif low.startswith("code:"):
+                    code_head = line.split(":", 1)[1].lstrip()
+                    code_tail = "\n".join(lines[i + 1 :])
+                    code = f"{code_head}\n{code_tail}".strip() if code_tail else code_head
+                    break
+                i += 1
+
+            if name and code:
+                out.append(
+                    {
+                        "name": name,
+                        "reason": reason,
+                        "risk": risk,
+                        "code": code,
+                    }
+                )
+        return out
+
+    def _handle_skill_proposals_from_reply(
+        self, reply: str, agent_id: str
+    ) -> Dict[str, Any]:
+        requests = self._extract_skill_requests(reply)
+        if not requests:
+            return {"queued": 0}
+        if not hasattr(self.tools, "save_runtime_proposal"):
+            return {"queued": 0, "error": "Tool registry proposal API unavailable"}
+
+        queued = 0
+        errors = []
+        for req in requests:
+            try:
+                self.tools.save_runtime_proposal(
+                    req.get("name", ""),
+                    req.get("reason", ""),
+                    req.get("code", ""),
+                    req.get("risk", ""),
+                    metadata={"agent_id": agent_id},
+                )
+                queued += 1
+            except Exception as e:
+                errors.append(str(e))
+        return {"queued": queued, "errors": errors}
+
+    def _execute_tool_calls_from_reply(self, reply: str) -> List[Dict[str, Any]]:
+        tool_calls = []
+        for match in re.finditer(r"\{[\s\S]*?\}", reply or ""):
+            chunk = match.group(0)
+            if '"action"' not in chunk:
+                continue
+            try:
+                data = json.loads(chunk)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            action = str(data.get("action", "")).strip().lower()
+            if action not in {"use_tool", "tool_call"}:
+                continue
+            tool_name = str(data.get("tool", "")).strip()
+            args = data.get("args", {})
+            if not tool_name:
+                continue
+            if not isinstance(args, dict):
+                args = {}
+            # Approval-gated web tools for agent autonomy safety.
+            if tool_name in {"web_search", "web_fetch"}:
+                policy = str(getattr(self, "web_tools_policy", "ask") or "ask").lower()
+                if policy in {"ask", "denied", "stopped"}:
+                    tool_calls.append(
+                        {
+                            "tool": tool_name,
+                            "args": args,
+                            "ok": False,
+                            "error": f"Web tool blocked by policy '{policy}'.",
+                        }
+                    )
+                    continue
+            try:
+                result = self.tools.run(tool_name, **args)
+                tool_calls.append(
+                    {"tool": tool_name, "args": args, "ok": True, "result": result}
+                )
+            except Exception as e:
+                tool_calls.append(
+                    {"tool": tool_name, "args": args, "ok": False, "error": str(e)}
+                )
+        return tool_calls
+
+    def _ensure_evidence_trail(
+        self, reply: str, brain_context: str, tool_results: List[Dict[str, Any]]
+    ) -> str:
+        text = str(reply or "").strip() or "No output generated."
+        low = text.lower()
+        if "evidence trail" in low and "confidence" in low:
+            return text
+
+        used_tools = []
+        for tr in tool_results or []:
+            if not isinstance(tr, dict):
+                continue
+            tname = str(tr.get("tool", "") or "").strip()
+            ok = bool(tr.get("ok"))
+            if tname:
+                used_tools.append(f"{tname} ({'ok' if ok else 'blocked/failed'})")
+        tools_txt = ", ".join(used_tools[:6]) if used_tools else "none"
+
+        brain_lines = []
+        for ln in str(brain_context or "").splitlines():
+            s = ln.strip()
+            if s:
+                brain_lines.append(s[:120])
+            if len(brain_lines) >= 4:
+                break
+        brain_txt = "; ".join(brain_lines) if brain_lines else "No indexed context available"
+
+        tail = (
+            "\n\nEvidence trail:\n"
+            f"- Brain context: {brain_txt}\n"
+            f"- Tool outputs: {tools_txt}\n"
+            "- Unknowns were not guessed.\n"
+            "Confidence: medium (auto-enforced evidence mode)\n"
+        )
+        return text + tail
 
 
 class MoneyEngine:

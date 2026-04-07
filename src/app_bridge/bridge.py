@@ -12,9 +12,20 @@ import platform
 import shutil
 import socket
 import csv
+import base64
+import imaplib
+import smtplib
+import email
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+from email.header import decode_header, make_header
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime, UTC
+
+from src.integrations.microsoft_oauth import MicrosoftOAuthManager
 
 
 class AppBridge:
@@ -27,6 +38,10 @@ class AppBridge:
         self._exo_agents = {}
         self._last_scan = {}
         self._obsidian_vault = self._resolve_obsidian_vault()
+        self._ms_oauth = MicrosoftOAuthManager(settings=settings)
+        self._oauth_loopback_server = None
+        self._oauth_loopback_thread = None
+        self._oauth_last_result: Dict[str, Any] = {}
         self._init_exo_agents()
 
     def _resolve_obsidian_vault(self) -> Optional[Path]:
@@ -108,6 +123,7 @@ class AppBridge:
         which_code = shutil.which("code")
         which_python = shutil.which("python")
 
+        oauth_status = self._ms_oauth.status()
         scan = {
             "timestamp": datetime.now(UTC).isoformat(),
             "runtime": {
@@ -173,6 +189,9 @@ class AppBridge:
                 "exo_available": bool(self._exo_agents),
                 "exo_gmail": "gmail" in self._exo_agents,
                 "exo_outlook": "outlook" in self._exo_agents,
+                "oauth_outlook_configured": oauth_status.get("configured", False),
+                "oauth_outlook_connected": oauth_status.get("connected", False),
+                "oauth_redirect_uri": oauth_status.get("redirect_uri", ""),
             },
         }
         self._last_scan = scan
@@ -214,7 +233,163 @@ class AppBridge:
             },
         }
 
+    def outlook_oauth_status(self) -> Dict[str, Any]:
+        status = {"ok": True, **self._ms_oauth.status()}
+        if self._oauth_last_result:
+            status["last_oauth_result"] = self._oauth_last_result
+        return status
+
+    def outlook_oauth_start(self, open_browser: bool = True) -> Dict[str, Any]:
+        result = self._ms_oauth.get_authorization_url()
+        if not result.get("ok"):
+            return result
+        listener = self._start_oauth_loopback_listener()
+        result["listener"] = listener
+        if open_browser:
+            self.chrome_open(result["auth_url"])
+        self._log(
+            "outlook_oauth_start",
+            {"redirect_uri": result.get("redirect_uri", ""), "open_browser": open_browser},
+        )
+        return result
+
+    def outlook_oauth_exchange(self, code: str, state: str = "") -> Dict[str, Any]:
+        result = self._ms_oauth.exchange_code(code=code, state=state)
+        self._oauth_last_result = {
+            "ts": datetime.now(UTC).isoformat(),
+            "ok": bool(result.get("ok")),
+            "error": result.get("error", ""),
+        }
+        self._log(
+            "outlook_oauth_exchange",
+            {"ok": bool(result.get("ok")), "state": state[:32]},
+        )
+        return result
+
+    def outlook_oauth_disconnect(self) -> Dict[str, Any]:
+        result = self._ms_oauth.clear_tokens()
+        self._oauth_last_result = {
+            "ts": datetime.now(UTC).isoformat(),
+            "ok": True,
+            "error": "",
+            "event": "disconnect",
+        }
+        self._log("outlook_oauth_disconnect", {"ok": bool(result.get("ok"))})
+        return result
+
+    def _start_oauth_loopback_listener(self) -> Dict[str, Any]:
+        cfg = self._ms_oauth.get_config()
+        redirect_uri = cfg.get("redirect_uri", "")
+        if not redirect_uri:
+            return {"ok": False, "error": "Missing redirect URI"}
+
+        if self._oauth_loopback_thread and self._oauth_loopback_thread.is_alive():
+            return {"ok": True, "status": "already_running", "redirect_uri": redirect_uri}
+
+        parsed = urlparse(redirect_uri)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 80
+        path = parsed.path or "/"
+        parent = self
+
+        class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                current = urlparse(self.path)
+                if current.path != path:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"Not Found")
+                    return
+
+                q = parse_qs(current.query)
+                code = (q.get("code") or [""])[0]
+                state = (q.get("state") or [""])[0]
+                error = (q.get("error") or [""])[0]
+
+                if error:
+                    parent._oauth_last_result = {
+                        "ts": datetime.now(UTC).isoformat(),
+                        "ok": False,
+                        "error": error,
+                    }
+                    payload = (
+                        "<html><body><h3>Baba OAuth Error</h3>"
+                        f"<p>{error}</p><p>You can close this tab.</p></body></html>"
+                    )
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(payload.encode("utf-8"))
+                    threading.Thread(
+                        target=parent._stop_oauth_loopback_listener, daemon=True
+                    ).start()
+                    return
+
+                exchange = parent.outlook_oauth_exchange(code=code, state=state)
+                if exchange.get("ok"):
+                    self.send_response(200)
+                    payload = (
+                        "<html><body><h3>Baba OAuth Connected</h3>"
+                        "<p>Connection successful. You can close this tab.</p></body></html>"
+                    )
+                else:
+                    self.send_response(400)
+                    payload = (
+                        "<html><body><h3>Baba OAuth Failed</h3>"
+                        f"<p>{exchange.get('error', 'Unknown error')}</p>"
+                        "<p>You can close this tab and retry.</p></body></html>"
+                    )
+
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8"))
+                threading.Thread(
+                    target=parent._stop_oauth_loopback_listener, daemon=True
+                ).start()
+
+            def log_message(self, fmt, *args):
+                return
+
+        try:
+            server = HTTPServer((host, port), _OAuthCallbackHandler)
+            server.timeout = 1.0
+        except OSError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "redirect_uri": redirect_uri,
+                "hint": "If UI server already runs on this port, callback will be handled by /oauth/callback endpoint.",
+            }
+
+        self._oauth_loopback_server = server
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self._oauth_loopback_thread = thread
+        return {
+            "ok": True,
+            "status": "listening",
+            "redirect_uri": redirect_uri,
+            "host": host,
+            "port": port,
+            "path": path,
+        }
+
+    def _stop_oauth_loopback_listener(self):
+        try:
+            if self._oauth_loopback_server:
+                self._oauth_loopback_server.shutdown()
+                self._oauth_loopback_server.server_close()
+        except Exception:
+            pass
+        self._oauth_loopback_server = None
+        self._oauth_loopback_thread = None
+
     def outlook_read_inbox(self, limit: int = 20, folder: str = "Inbox") -> List[Dict]:
+        oauth_status = self._ms_oauth.status()
+        if oauth_status.get("connected"):
+            oauth_items = self._imap_read(limit, folder=folder)
+            if oauth_items and not oauth_items[0].get("error"):
+                return oauth_items
         try:
             return self._outlook_win32_read(limit, folder)
         except Exception:
@@ -236,38 +411,128 @@ class AppBridge:
                         ]
                 except Exception:
                     pass
-            return self._imap_read(limit)
+            return self._imap_read(limit, folder=folder)
 
     def _outlook_win32_read(self, limit: int, folder: str) -> List[Dict]:
         import win32com.client
 
-        ol = win32com.client.Dispatch("Outlook.Application")
-        ns = ol.GetNamespace("MAPI")
-        box = ns.GetDefaultFolder(6)
-        msgs = box.Items
-        msgs.Sort("[ReceivedTime]", True)
-        items = []
-        for i, msg in enumerate(msgs):
-            if i >= limit:
-                break
-            items.append(
+        com_inited = False
+        try:
+            try:
+                import pythoncom  # type: ignore
+
+                pythoncom.CoInitialize()
+                com_inited = True
+            except Exception:
+                pass
+
+            ol = win32com.client.Dispatch("Outlook.Application")
+            ns = ol.GetNamespace("MAPI")
+            box = ns.GetDefaultFolder(6)
+            msgs = box.Items
+            msgs.Sort("[ReceivedTime]", True)
+            items = []
+            for i, msg in enumerate(msgs):
+                if i >= limit:
+                    break
+                items.append(
+                    {
+                        "subject": msg.Subject,
+                        "sender": msg.SenderName,
+                        "date": str(msg.ReceivedTime),
+                        "body": msg.Body[:500],
+                        "read": msg.UnRead is False,
+                    }
+                )
+            return items
+        finally:
+            if com_inited:
+                try:
+                    import pythoncom  # type: ignore
+
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+    def _imap_read(self, limit: int, folder: str = "Inbox") -> List[Dict]:
+        token_res = self._ms_oauth.get_access_token()
+        if not token_res.get("ok"):
+            return [
                 {
-                    "subject": msg.Subject,
-                    "sender": msg.SenderName,
-                    "date": str(msg.ReceivedTime),
-                    "body": msg.Body[:500],
-                    "read": msg.UnRead is False,
+                    "error": token_res.get("error", "OAuth token unavailable"),
+                    "hint": "Connect Outlook OAuth first via /api/auth/microsoft/start",
+                    "redirect_uri": self._ms_oauth.status().get("redirect_uri", ""),
                 }
+            ]
+
+        cfg = self._ms_oauth.get_config()
+        user = cfg.get("email") or os.getenv("IMAP_USER", "").strip()
+        if not user:
+            return [
+                {
+                    "error": "Missing email account for IMAP",
+                    "hint": "Set IMAP_USER or OUTLOOK_EMAIL in .env",
+                }
+            ]
+        host = os.getenv("IMAP_HOST", "outlook.office365.com").strip() or "outlook.office365.com"
+        port = int(os.getenv("IMAP_PORT", "993") or "993")
+        mailbox = folder or "Inbox"
+        mailbox = "INBOX" if mailbox.lower() == "inbox" else mailbox
+
+        items: List[Dict[str, Any]] = []
+        conn = None
+        try:
+            conn = imaplib.IMAP4_SSL(host, port)
+            auth_string = f"user={user}\x01auth=Bearer {token_res['access_token']}\x01\x01"
+            conn.authenticate("XOAUTH2", lambda _: auth_string.encode("utf-8"))
+            conn.select(mailbox)
+            status, data = conn.search(None, "ALL")
+            if status != "OK":
+                return [{"error": f"IMAP search failed on {mailbox}"}]
+            ids = data[0].split()[-max(1, int(limit)) :]
+            for msg_id in reversed(ids):
+                st, msg_data = conn.fetch(msg_id, "(RFC822)")
+                if st != "OK":
+                    continue
+                raw_bytes = None
+                for part in msg_data:
+                    if isinstance(part, tuple) and len(part) > 1:
+                        raw_bytes = part[1]
+                        break
+                if not raw_bytes:
+                    continue
+                msg = email.message_from_bytes(raw_bytes)
+                subject = self._decode_mime_header(msg.get("Subject", ""))
+                sender = self._decode_mime_header(msg.get("From", ""))
+                date_val = self._decode_mime_header(msg.get("Date", ""))
+                body = self._extract_plain_text(msg)
+                items.append(
+                    {
+                        "subject": subject,
+                        "sender": sender,
+                        "date": date_val,
+                        "body": body[:1200],
+                        "read": True,
+                    }
+                )
+            self._log(
+                "outlook_imap_read",
+                {"count": len(items), "mailbox": mailbox, "host": host},
             )
-        return items
-
-    def _imap_read(self, limit: int) -> List[Dict]:
-        import imaplib
-
-        host = "imap.gmail.com"
-        return [
-            {"error": f"Configure IMAP credentials in config/config.json. Host: {host}"}
-        ]
+            return items
+        except Exception as e:
+            return [
+                {
+                    "error": str(e),
+                    "hint": "Verify Azure permissions (IMAP.AccessAsUser.All), IMAP enabled mailbox, and OAuth token",
+                }
+            ]
+        finally:
+            try:
+                if conn:
+                    conn.logout()
+            except Exception:
+                pass
 
     def outlook_draft(self, to: str, subject: str, body: str) -> Dict:
         try:
@@ -301,6 +566,59 @@ class AppBridge:
                 "fallback": "Draft text prepared - paste manually into Outlook",
             }
 
+    def outlook_send(self, to: str, subject: str, body: str, approved: bool = False) -> Dict:
+        if not approved:
+            return {
+                "ok": False,
+                "requires_approval": True,
+                "to": to,
+                "subject": subject,
+                "preview": (body or "")[:200],
+            }
+
+        token_res = self._ms_oauth.get_access_token()
+        if not token_res.get("ok"):
+            return {"ok": False, "error": token_res.get("error", "OAuth token unavailable")}
+
+        cfg = self._ms_oauth.get_config()
+        sender = cfg.get("email") or os.getenv("IMAP_USER", "").strip()
+        if not sender:
+            return {"ok": False, "error": "Missing sender email (set IMAP_USER or OUTLOOK_EMAIL)"}
+
+        host = os.getenv("SMTP_HOST", "smtp.office365.com").strip() or "smtp.office365.com"
+        port = int(os.getenv("SMTP_PORT", "587") or "587")
+
+        msg = MIMEText(body or "", "plain", "utf-8")
+        msg["From"] = sender
+        msg["To"] = to
+        msg["Subject"] = subject
+
+        smtp = None
+        try:
+            smtp = smtplib.SMTP(host, port, timeout=30)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            xoauth = f"user={sender}\x01auth=Bearer {token_res['access_token']}\x01\x01"
+            xoauth_b64 = base64.b64encode(xoauth.encode("utf-8")).decode("utf-8")
+            code, resp = smtp.docmd("AUTH", "XOAUTH2 " + xoauth_b64)
+            if code != 235:
+                return {
+                    "ok": False,
+                    "error": f"SMTP XOAUTH2 failed: {code} {resp.decode(errors='ignore') if isinstance(resp, bytes) else resp}",
+                }
+            smtp.sendmail(sender, [to], msg.as_string())
+            self._log("outlook_send", {"to": to, "subject": subject, "host": host})
+            return {"ok": True, "message": f"Email sent to {to}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        finally:
+            try:
+                if smtp:
+                    smtp.quit()
+            except Exception:
+                pass
+
     def outlook_open(self) -> Dict:
         if os.name != "nt":
             return {"ok": False, "error": "Outlook auto-launch currently Windows-only"}
@@ -310,6 +628,33 @@ class AppBridge:
             return {"ok": True, "message": "Outlook launch command sent"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def _decode_mime_header(self, value: str) -> str:
+        try:
+            return str(make_header(decode_header(value or "")))
+        except Exception:
+            return value or ""
+
+    def _extract_plain_text(self, msg: email.message.Message) -> str:
+        if msg.is_multipart():
+            chunks = []
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                disp = str(part.get("Content-Disposition", "")).lower()
+                if ctype == "text/plain" and "attachment" not in disp:
+                    try:
+                        payload = part.get_payload(decode=True) or b""
+                        charset = part.get_content_charset() or "utf-8"
+                        chunks.append(payload.decode(charset, errors="ignore"))
+                    except Exception:
+                        continue
+            return "\n".join(chunks).strip()
+        try:
+            payload = msg.get_payload(decode=True) or b""
+            charset = msg.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="ignore").strip()
+        except Exception:
+            return ""
 
     def gmail_open(self) -> Dict:
         return self.chrome_open("https://mail.google.com")
@@ -371,6 +716,245 @@ class AppBridge:
         summary = {k: len(v) for k, v in buckets.items()}
         self._log("exo_triage_inbox", {"summary": summary})
         return {"ok": True, "summary": summary, "buckets": buckets}
+
+    def outlook_read_all_folders(
+        self,
+        limit_per_folder: int = 30,
+        max_folders: int = 180,
+        include_subfolders: bool = True,
+        progress_cb=None,
+    ) -> Dict[str, Any]:
+        """
+        Read Outlook mail across all mailbox stores/folders visible in Desktop Outlook.
+        Best path for multi-account setups (multiple Outlook/Gmail accounts configured in Outlook client).
+        """
+        try:
+            import win32com.client
+        except Exception as e:
+            return {"ok": False, "error": f"win32 outlook unavailable: {e}"}
+
+        com_inited = False
+        try:
+            folder_limit = int(limit_per_folder)
+        except Exception:
+            folder_limit = 30
+        try:
+            folder_cap = int(max_folders)
+        except Exception:
+            folder_cap = 180
+        no_item_limit = folder_limit <= 0
+        no_folder_cap = folder_cap <= 0
+        messages: List[Dict[str, Any]] = []
+        folder_stats: List[Dict[str, Any]] = []
+        seen = set()
+        scanned_folders = 0
+        store_names: List[str] = []
+
+        try:
+            try:
+                import pythoncom  # type: ignore
+
+                pythoncom.CoInitialize()
+                com_inited = True
+            except Exception:
+                pass
+
+            ol = win32com.client.Dispatch("Outlook.Application")
+            ns = ol.GetNamespace("MAPI")
+        except Exception as e:
+            return {"ok": False, "error": f"Outlook MAPI init failed: {e}"}
+
+        def walk(folder, parent_path: str = ""):
+            nonlocal scanned_folders
+            if (not no_folder_cap) and scanned_folders >= folder_cap:
+                return
+
+            name = str(getattr(folder, "Name", "") or "").strip() or "Folder"
+            folder_path = f"{parent_path}/{name}" if parent_path else name
+            scanned_folders += 1
+            added = 0
+
+            try:
+                items = folder.Items
+                try:
+                    items.Sort("[ReceivedTime]", True)
+                except Exception:
+                    pass
+                for msg in items:
+                    if (not no_item_limit) and added >= max(1, folder_limit):
+                        break
+                    try:
+                        # MailItem class id in Outlook Object Model.
+                        if int(getattr(msg, "Class", 0) or 0) != 43:
+                            continue
+                        subject = str(getattr(msg, "Subject", "") or "")
+                        sender = str(getattr(msg, "SenderName", "") or "")
+                        body = str(getattr(msg, "Body", "") or "")
+                        date_val = str(getattr(msg, "ReceivedTime", "") or "")
+                        unread = bool(getattr(msg, "UnRead", False))
+                        flag_status = int(getattr(msg, "FlagStatus", 0) or 0)
+                        flagged = flag_status in (1, 2)
+                        cats = str(getattr(msg, "Categories", "") or "")
+                        pinned = "pinned" in cats.lower()
+                        key = (subject, sender, date_val, folder_path)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        messages.append(
+                            {
+                                "subject": subject,
+                                "sender": sender,
+                                "date": date_val,
+                                "body": body[:1200],
+                                "read": not unread,
+                                "flagged": bool(flagged),
+                                "pinned": bool(pinned),
+                                "folder": folder_path,
+                                "priority": self._triage_priority(subject, body),
+                            }
+                        )
+                        added += 1
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            folder_stats.append({"folder": folder_path, "messages": added})
+            if callable(progress_cb):
+                try:
+                    progress_cb(
+                        {
+                            "stores_detected": len(store_names),
+                            "folders_scanned": scanned_folders,
+                            "messages_collected": len(messages),
+                            "current_folder": folder_path,
+                        }
+                    )
+                except Exception:
+                    pass
+
+            if not include_subfolders:
+                return
+            try:
+                for sub in folder.Folders:
+                    walk(sub, folder_path)
+                    if (not no_folder_cap) and scanned_folders >= folder_cap:
+                        break
+            except Exception:
+                pass
+
+        # Enumerate stores safely so one bad store does not kill the full scan.
+        try:
+            store_count = int(getattr(ns.Folders, "Count", 0) or 0)
+            for idx in range(1, store_count + 1):
+                try:
+                    store = ns.Folders.Item(idx)
+                    sname = str(getattr(store, "Name", "") or "").strip()
+                    if sname and sname not in store_names:
+                        store_names.append(sname)
+                    walk(store, "")
+                except Exception:
+                    continue
+                if (not no_folder_cap) and scanned_folders >= folder_cap:
+                    break
+        except Exception as e:
+            return {"ok": False, "error": f"Outlook folder walk failed: {e}"}
+        finally:
+            if com_inited:
+                try:
+                    import pythoncom  # type: ignore
+
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
+        buckets = {"high": [], "medium": [], "low": [], "skip": []}
+        for m in messages:
+            buckets[m.get("priority", "low")].append(m)
+        summary = {k: len(v) for k, v in buckets.items()}
+        summary["total"] = len(messages)
+        summary["folders_scanned"] = scanned_folders
+        accounts: Dict[str, int] = {}
+        for m in messages:
+            folder = str(m.get("folder", "") or "")
+            root = folder.split("/", 1)[0].strip() if folder else ""
+            if root:
+                accounts[root] = accounts.get(root, 0) + 1
+        summary["accounts_scanned"] = len(accounts)
+        summary["accounts"] = accounts
+        summary["stores_detected_count"] = len(store_names)
+        summary["stores_detected"] = store_names
+        self._log("outlook_read_all_folders", summary)
+        return {
+            "ok": True,
+            "summary": summary,
+            "buckets": buckets,
+            "folders": folder_stats,
+            "messages": messages,
+        }
+
+    def exo_triage_all_mail(
+        self,
+        limit_per_folder: int = 30,
+        max_folders: int = 180,
+        include_subfolders: bool = True,
+        progress_cb=None,
+    ) -> Dict[str, Any]:
+        """
+        Full triage across Outlook stores/folders (preferred), plus EXO agent unread fallback.
+        """
+        full = self.outlook_read_all_folders(
+            limit_per_folder=limit_per_folder,
+            max_folders=max_folders,
+            include_subfolders=include_subfolders,
+            progress_cb=progress_cb,
+        )
+        messages: List[Dict[str, Any]] = []
+        if full.get("ok"):
+            messages.extend(full.get("messages", []))
+
+        # Fallback/additive unread from EXO agents.
+        if not messages:
+            fallback = self.exo_triage_inbox(limit=max(20, int(limit_per_folder)))
+            if fallback.get("ok"):
+                for level, items in fallback.get("buckets", {}).items():
+                    for it in items:
+                        item = dict(it)
+                        item["priority"] = level
+                        messages.append(item)
+
+        buckets = {"high": [], "medium": [], "low": [], "skip": []}
+        for msg in messages:
+            level = msg.get("priority", "low")
+            if level not in buckets:
+                level = "low"
+            buckets[level].append(msg)
+        summary = {k: len(v) for k, v in buckets.items()}
+        summary["total"] = len(messages)
+        if full.get("ok"):
+            summary["folders_scanned"] = (
+                full.get("summary", {}) or {}
+            ).get("folders_scanned", 0)
+            summary["accounts_scanned"] = (
+                full.get("summary", {}) or {}
+            ).get("accounts_scanned", 0)
+            summary["accounts"] = (
+                full.get("summary", {}) or {}
+            ).get("accounts", {})
+            summary["stores_detected_count"] = (
+                full.get("summary", {}) or {}
+            ).get("stores_detected_count", 0)
+            summary["stores_detected"] = (
+                full.get("summary", {}) or {}
+            ).get("stores_detected", [])
+        self._log("exo_triage_all_mail", summary)
+        return {
+            "ok": True,
+            "summary": summary,
+            "buckets": buckets,
+            "outlook_full_scan": full,
+            "note": "No messages found" if not messages else "",
+        }
 
     def _triage_priority(self, subject: str, body: str) -> str:
         text = f"{subject} {body}".lower()

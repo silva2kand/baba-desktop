@@ -35,6 +35,8 @@ class Settings:
     voice_enabled: bool = False
     safety: Dict[str, Any] = field(default_factory=dict)
     vision: Dict[str, Any] = field(default_factory=dict)
+    integrations: Dict[str, Any] = field(default_factory=dict)
+    oauth_redirect_uri: str = "http://localhost:8080/oauth/callback"
     _raw: Dict[str, Any] = field(default_factory=dict, repr=False)
     _path: Path = field(default=CONFIG_PATH, repr=False)
 
@@ -67,6 +69,11 @@ class Settings:
         s.voice_enabled   = bool(raw.get("ui", {}).get("auto_tts", s.voice_enabled))
         s.safety          = raw.get("safety", {})
         s.vision          = raw.get("vision", {})
+        s.integrations    = raw.get("integrations", {})
+        s.oauth_redirect_uri = (
+            s.integrations.get("oauth", {}).get("redirect_uri")
+            or f"http://localhost:{s.ui_port}/oauth/callback"
+        )
 
         # Inject API keys from environment
         for pname, pcfg in s.providers.items():
@@ -103,6 +110,9 @@ class Settings:
     def is_provider_enabled(self, provider: str) -> bool:
         return self.providers.get(provider, {}).get("enabled", False)
 
+    def get_localhost_redirect_uri(self) -> str:
+        return self.oauth_redirect_uri or f"http://localhost:{self.ui_port}/oauth/callback"
+
     def save(self, path: Path | None = None) -> None:
         out_path = path or self._path or CONFIG_PATH
         raw = dict(self._raw) if self._raw else {}
@@ -134,6 +144,12 @@ class Settings:
         raw["ui"]["auto_tts"] = self.voice_enabled
         raw["safety"] = self.safety
         raw["vision"] = self.vision
+        raw.setdefault("integrations", {})
+        existing_oauth = raw.get("integrations", {}).get("oauth", {})
+        if not isinstance(existing_oauth, dict):
+            existing_oauth = {}
+        existing_oauth["redirect_uri"] = self.get_localhost_redirect_uri()
+        raw["integrations"]["oauth"] = existing_oauth
 
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(raw, f, indent=2)

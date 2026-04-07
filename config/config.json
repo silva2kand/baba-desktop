@@ -195,5 +195,27 @@
   },
   "memory": {
     "dir": "data/brain_memory"
+  },
+  "integrations": {
+    "oauth": {
+      "redirect_uri": "http://localhost:8080/oauth/callback",
+      "microsoft": {
+        "tenant_id": "39f9740f-7162-4ff5-93ea-149c79ee1b7a",
+        "client_id": "ad812767-4ca3-4218-95fb-39bf998ad29e",
+        "client_secret": "",
+        "email": "silvak2023@outlook.com",
+        "scopes": [
+          "offline_access",
+          "openid",
+          "profile",
+          "User.Read",
+          "IMAP.AccessAsUser.All",
+          "SMTP.Send",
+          "Mail.Read",
+          "Mail.ReadWrite",
+          "Mail.Send"
+        ]
+      }
+    }
   }
 }

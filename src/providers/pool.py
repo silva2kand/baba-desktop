@@ -67,12 +67,58 @@ class ProviderPool:
         "lmstudio": LMS_KNOWN,
     }
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        master_memory_text: str = "",
+        master_memory_path: str = "data/baba_master_memory.txt",
+    ):
         self.config = config
         self._live_models: Dict[str, List[str]] = {}
         self._detected: Dict[str, bool] = {}
         self._resolved_cache: Dict[tuple, str] = {}
         self._clients = {}
+        self._master_memory_path = Path(master_memory_path)
+        self._master_memory_text = (master_memory_text or "").strip()
+        if not self._master_memory_text:
+            self.reload_master_memory()
+
+    def set_master_memory(self, text: str):
+        self._master_memory_text = (text or "").strip()
+
+    def reload_master_memory(self):
+        try:
+            p = self._master_memory_path
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            if p.exists():
+                self._master_memory_text = p.read_text(encoding="utf-8").strip()
+        except Exception:
+            # Keep existing in-memory text if reload fails.
+            pass
+
+    def _compose_system_prompt(self, system: str = "") -> str:
+        mem = (self._master_memory_text or "").strip()
+        sys = (system or "").strip()
+        if mem and sys:
+            return (
+                "Permanent Master Memory (local file):\n"
+                f"{mem}\n\n"
+                "Task/System Instructions:\n"
+                f"{sys}"
+            )
+        if mem:
+            return f"Permanent Master Memory (local file):\n{mem}"
+        return sys
+
+    def _sanitize_assistant_output(self, text: str) -> str:
+        out = text or ""
+        out = re.sub(r"<thought>[\s\S]*?</thought>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<think>[\s\S]*?</think>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"</?thought>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"</?think>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip()
 
     def detect_all(self) -> Dict[str, Any]:
         results = {}
@@ -297,17 +343,18 @@ class ProviderPool:
         max_tokens: int = 2048,
         stream: bool = False,
     ) -> str:
-        if system:
-            messages = [{"role": "system", "content": system}] + messages
+        composed_system = self._compose_system_prompt(system)
+        if composed_system:
+            messages = [{"role": "system", "content": composed_system}] + messages
 
         if provider in self.LOCAL_ENDPOINTS:
             model = self.resolve_model(provider, model)
 
         try:
             if provider == "ollama":
-                return await self._ollama(model, messages, temperature, stream)
+                reply = await self._ollama(model, messages, temperature, stream)
             elif provider == "jan":
-                return await self._openai_compat(
+                reply = await self._openai_compat(
                     "jan",
                     "http://localhost:1337/v1",
                     model,
@@ -316,7 +363,7 @@ class ProviderPool:
                     max_tokens,
                 )
             elif provider == "lmstudio":
-                return await self._openai_compat(
+                reply = await self._openai_compat(
                     "lmstudio",
                     "http://localhost:1234/v1",
                     model,
@@ -325,7 +372,7 @@ class ProviderPool:
                     max_tokens,
                 )
             elif provider == "groq":
-                return await self._openai_compat(
+                reply = await self._openai_compat(
                     "groq",
                     "https://api.groq.com/openai/v1",
                     model,
@@ -334,11 +381,11 @@ class ProviderPool:
                     max_tokens,
                 )
             elif provider == "gemini":
-                return await self._gemini(
-                    model, messages, system, temperature, max_tokens
+                reply = await self._gemini(
+                    model, messages, composed_system, temperature, max_tokens
                 )
             elif provider in ("openrouter", "or"):
-                return await self._openai_compat(
+                reply = await self._openai_compat(
                     "openrouter",
                     "https://openrouter.ai/api/v1",
                     model,
@@ -351,7 +398,7 @@ class ProviderPool:
                     },
                 )
             elif provider == "qwen":
-                return await self._openai_compat(
+                reply = await self._openai_compat(
                     "qwen",
                     "https://dashscope.aliyuncs.com/compatible-mode/v1",
                     model,
@@ -361,6 +408,7 @@ class ProviderPool:
                 )
             else:
                 raise ValueError(f"Unknown provider: {provider}")
+            return self._sanitize_assistant_output(reply)
         except Exception as e:
             raise RuntimeError(f"[{provider}/{model}] {e}") from e
 

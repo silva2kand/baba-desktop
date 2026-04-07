@@ -96,5 +96,19 @@
     "last_run": null,
     "run_count": 0,
     "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "email_organiser_45m": {
+    "task_id": "email_organiser_45m",
+    "name": "Email organiser (every 45 min)",
+    "instruction": "Organise all inbox emails into urgent, accounting, supplier, legal, and follow-up categories. Summarise required actions.",
+    "trigger": "interval",
+    "trigger_cfg": {
+      "minutes": 45,
+      "run_on_start": true
+    },
+    "enabled": true,
+    "last_run": "2026-04-07T15:31:26.518915+00:00",
+    "run_count": 6,
+    "created_at": "2026-04-07T10:46:41.588708+00:00"
   }
 }
