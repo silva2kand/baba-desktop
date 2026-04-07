@@ -1,0 +1,199 @@
+{
+  "providers": {
+    "ollama": {
+      "enabled": true,
+      "url": "http://localhost:11434",
+      "models": {
+        "default": "qwen3.5:latest",
+        "fast": "sorc/qwen3.5-claude-4.6-opus:0.8b",
+        "reasoning": "sorc/qwen3.5-claude-4.6-opus:4b",
+        "reasoning2": "sorc/qwen3.5-claude-4.6-opus:2b",
+        "abliterated": "huihui_ai/qwen3.5-abliterated:9b",
+        "gemma3_12b": "gemma3:12b",
+        "gemma3_12b_it": "gemma-3-12b-it:latest",
+        "llama31": "llama3.1:8b",
+        "llama32": "llama3.2:3b",
+        "bonsai": "hf.co/prism-ml/Bonsai-8B-gguf:latest",
+        "embed": "nomic-embed-text:latest",
+        "minimax": "minimax-m2.7:cloud",
+        "nemotron": "nemotron-3-super:cloud"
+      }
+    },
+    "jan": {
+      "enabled": true,
+      "url": "http://localhost:1337",
+      "models": {
+        "default": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        "qwen35_4b": "unsloth/Qwen3.5-4B-GGUF",
+        "qwen35_4b_dist_v1": "Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+        "qwen35_4b_dist_v2": "Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF",
+        "qwen35_9b_dist_v1": "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+        "qwen35_9b_dist_v2": "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF",
+        "qwen35_9b_gemini": "Jackrong/Qwen3.5-9B-Gemini-3.1-Pro-Reasoning-Distill-GGUF",
+        "qwen35_9b_neo": "Jackrong/Qwen3.5-9B-Neo-GGUF",
+        "qwopus": "Jackrong/Qwopus3.5-9B-v3-GGUF",
+        "coder14b": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"
+      }
+    },
+    "lmstudio": {
+      "enabled": true,
+      "url": "http://localhost:1234",
+      "models": {
+        "gemma4": "ggml-org/gemma-4-e2b-it",
+        "bonsai8b": "bartowski/prism-ml_bonsai-8b-unpacked",
+        "bonsai_base": "prism-ml/bonsai-8b",
+        "omnicoder": "mradermacher/omnicoder-9b",
+        "qwen35_9b": "lmstudio-community/qwen/qwen3.5-9b",
+        "glm4": "lmstudio-community/zai-org/glm-4.6v-flash",
+        "qwen35_9b_dist": "Jackrong/qwen3.5-9b-claude-4.6-opus-reasoning-distilled",
+        "qwen35_4b_dist": "Jackrong/qwen3.5-4b-claude-4.6-opus-reasoning-distilled",
+        "gemma3_12b": "ggml-org/gemma-3-12b-it",
+        "bonsai_packed": "bartowski/prism-ml_bonsai-8b-packed"
+      }
+    },
+    "groq": {
+      "enabled": true,
+      "url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "models": {
+        "default": "llama-3.3-70b-versatile",
+        "fast": "gemma2-9b-it",
+        "mix": "mixtral-8x7b-32768"
+      }
+    },
+    "gemini": {
+      "enabled": true,
+      "api_key_env": "GEMINI_API_KEY",
+      "models": {
+        "default": "gemini-2.0-flash-exp",
+        "pro": "gemini-1.5-pro"
+      }
+    },
+    "openrouter": {
+      "enabled": true,
+      "url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "models": {
+        "default": "mistralai/mistral-7b-instruct:free",
+        "fallback": "meta-llama/llama-3-8b-instruct:free",
+        "deep": "deepseek/deepseek-chat-v3-0324:free"
+      }
+    },
+    "qwen": {
+      "enabled": false,
+      "url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "QWEN_API_KEY",
+      "models": {
+        "default": "qwen-max",
+        "large": "qwen2.5-72b-instruct",
+        "fast": "qwen-turbo"
+      }
+    }
+  },
+  "routing": {
+    "general_chat": {
+      "provider": "ollama",
+      "model": "default"
+    },
+    "code_generation": {
+      "provider": "lmstudio",
+      "model": "omnicoder"
+    },
+    "code_editing": {
+      "provider": "jan",
+      "model": "coder14b"
+    },
+    "deep_reasoning": {
+      "provider": "lmstudio",
+      "model": "qwen35_9b_dist"
+    },
+    "fast_reasoning": {
+      "provider": "jan",
+      "model": "qwen35_4b_dist_v2"
+    },
+    "vision": {
+      "provider": "lmstudio",
+      "model": "glm4"
+    },
+    "pc_control": {
+      "provider": "ollama",
+      "model": "reasoning"
+    },
+    "app_automation": {
+      "provider": "groq",
+      "model": "default"
+    },
+    "legal_analysis": {
+      "provider": "groq",
+      "model": "default"
+    },
+    "long_documents": {
+      "provider": "gemini",
+      "model": "default"
+    },
+    "business_analysis": {
+      "provider": "jan",
+      "model": "qwen35_9b_dist_v2"
+    },
+    "tool_building": {
+      "provider": "lmstudio",
+      "model": "omnicoder"
+    },
+    "ultra_fast_router": {
+      "provider": "ollama",
+      "model": "fast"
+    },
+    "fallback": {
+      "provider": "openrouter",
+      "model": "fallback"
+    }
+  },
+  "brain": {
+    "db_path": "data/brain_index/brain.db",
+    "watch_folders": [
+      "data/imports/bills",
+      "data/imports/contracts",
+      "data/imports/emails",
+      "data/imports/pdfs"
+    ],
+    "auto_tag": true,
+    "auto_summarise": true
+  },
+  "pc_bridge": {
+    "port": 8765,
+    "safe_mode": true,
+    "require_approval": true,
+    "log_all_actions": true
+  },
+  "vision": {
+    "primary_provider": "lmstudio",
+    "primary_model": "glm4",
+    "fallback_provider": "gemini",
+    "fallback_model": "gemini-2.0-flash-exp",
+    "auto_index_to_brain": true
+  },
+  "claws_dir": "src/claws/installed",
+  "tools_experimental_dir": "src/tools_experimental",
+  "tools_active_dir": "src/tools",
+  "exports_dir": "data/exports",
+  "logs_dir": "logs",
+  "ui": {
+    "port": 8080,
+    "theme": "dark",
+    "auto_tts": false,
+    "streaming": true,
+    "mode": "web"
+  },
+  "safety": {
+    "require_approval_for_send": true,
+    "require_approval_for_write": true,
+    "require_approval_for_execute": true,
+    "require_approval_for_install": true,
+    "never_move_money": true,
+    "never_sign_documents": true,
+    "log_all_approvals": true
+  },
+  "memory": {
+    "dir": "data/brain_memory"
+  }
+}

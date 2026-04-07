@@ -1,0 +1,100 @@
+{
+  "daily_email_check": {
+    "task_id": "daily_email_check",
+    "name": "Daily email triage",
+    "instruction": "Check inbox, summarise unread emails, extract tasks, flag urgent items. Draft replies for approval.",
+    "trigger": "daily",
+    "trigger_cfg": {
+      "time": "08:30"
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "weekly_cashflow": {
+    "task_id": "weekly_cashflow",
+    "name": "Weekly cashflow report",
+    "instruction": "Generate weekly cashflow report from Brain Index. Summarise bills, upcoming renewals, overdue invoices.",
+    "trigger": "weekly",
+    "trigger_cfg": {
+      "time": "09:00",
+      "days": [
+        "monday"
+      ]
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "weekly_slack_digest": {
+    "task_id": "weekly_slack_digest",
+    "name": "Weekly Slack digest",
+    "instruction": "Summarise all Slack messages from the past week. Extract key decisions, action items, and pending replies.",
+    "trigger": "weekly",
+    "trigger_cfg": {
+      "time": "09:00",
+      "days": [
+        "monday"
+      ]
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "daily_renewal_check": {
+    "task_id": "daily_renewal_check",
+    "name": "Daily renewal radar",
+    "instruction": "Check Brain Index for renewals due in next 30 days. Alert if anything needs attention.",
+    "trigger": "daily",
+    "trigger_cfg": {
+      "time": "09:00"
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "watch_bills_folder": {
+    "task_id": "watch_bills_folder",
+    "name": "Auto-ingest bills folder",
+    "instruction": "New file detected in bills folder. Process with Vision Pipeline and add to Brain Index.",
+    "trigger": "file_new",
+    "trigger_cfg": {
+      "folder": "data/imports/bills"
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "monthly_supplier_analysis": {
+    "task_id": "monthly_supplier_analysis",
+    "name": "Monthly supplier analysis",
+    "instruction": "Run full supplier analysis. Cluster by spend, identify renegotiation targets, flag price changes.",
+    "trigger": "monthly",
+    "trigger_cfg": {
+      "day": 1,
+      "time": "09:00"
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  },
+  "folder_organiser": {
+    "task_id": "folder_organiser",
+    "name": "Auto-organise downloads",
+    "instruction": "Sort Downloads folder: move PDFs to docs/, images to assets/, rename by date. Report changes.",
+    "trigger": "daily",
+    "trigger_cfg": {
+      "time": "18:00"
+    },
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0,
+    "created_at": "2026-04-06T06:32:46.995287"
+  }
+}
